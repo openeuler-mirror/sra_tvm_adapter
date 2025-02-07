@@ -4,20 +4,16 @@
 Adapter for Kunpeng TVM Library
 
 #### 软件架构
-软件架构说明
 
 
 #### 安装教程
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+1.  获取TVM-0.9.0开源版代码，并初始化git仓库；
+2.  下载softmax.patch补丁，将其合入TVM-0.9.0项目代码中；
+3.  编译构建TVM库，需集成毕昇编译器用于鲲鹏CPU平台代码的生成（可在[鲲鹏社区](https://www.hikunpeng.com/document/detail/zh/SRA/overview/kunpengsra.html)获取对应安装指南）；
 
 #### 使用说明
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
 
 #### 参与贡献
 

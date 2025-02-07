@@ -1,0 +1,102 @@
+diff --git a/python/tvm/topi/nn/softmax.py b/python/tvm/topi/nn/softmax.py
+index cb6d5b3..452b226 100644
+--- a/python/tvm/topi/nn/softmax.py
++++ b/python/tvm/topi/nn/softmax.py
+@@ -95,9 +95,15 @@ def softmax_common(x, axis, use_fast_exp):
+         eval_range = insert_reduce_index(indices, k2)
+         return te.sum(exp[eval_range], axis=k2)
+ 
+-    def _normalize(exp, expsum, *indices):
++    # Add this function to precompute 1 / expsum
++    def _compute_inv_expsum(expsum, *indices):
++        # non_reduce_indices = get_non_reduce_indices(indices)
++        return 1.0 / expsum[indices]
++
++    # new normalize
++    def _normalize(exp, inv_expsum, *indices):
+         non_reduce_indices = get_non_reduce_indices(indices)
+-        return exp[indices] / expsum[non_reduce_indices]
++        return exp[indices] * inv_expsum[non_reduce_indices]  # Use multiplication instead of division
+ 
+     reduced_shape = tuple([dim for (i, dim) in enumerate(shape) if i != axis])
+     max_elem = te.compute(reduced_shape, _compute_max, name="T_softmax_maxelem")
+@@ -114,9 +120,15 @@ def softmax_common(x, axis, use_fast_exp):
+     expsum = te.compute(
+         reduced_shape, lambda *indices: _compute_expsum(exp, *indices), name="T_softmax_expsum"
+     )
++
++    # Add this to compute the inverse of expsum
++    inv_expsum = te.compute(
++        reduced_shape, lambda *indices: _compute_inv_expsum(expsum, *indices), name="T_softmax_inv_expsum"
++    )
++ 
+     return te.compute(
+         shape,
+-        lambda *indices: _normalize(exp, expsum, *indices),
++        lambda *indices: _normalize(exp, inv_expsum, *indices),
+         name="T_softmax_norm",
+         attrs={"axis": axis},
+     )
+diff --git a/python/tvm/topi/x86/nn.py b/python/tvm/topi/x86/nn.py
+index 9b6754c..e70fc6d 100644
+--- a/python/tvm/topi/x86/nn.py
++++ b/python/tvm/topi/x86/nn.py
+@@ -16,7 +16,7 @@
+ # under the License.
+ # pylint: disable=invalid-name,too-many-locals,unused-variable
+ """x86 nn operators"""
+-from tvm import te
++from tvm import te, tir
+ from ..utils import traverse_inline
+ 
+ 
+@@ -24,13 +24,15 @@ def _schedule_softmax(softmax_op, s, outs):
+     op_tag = softmax_op.tag
+     if op_tag == "softmax_output":
+         exp = softmax_op.input_tensors[0]
+-        expsum = softmax_op.input_tensors[1]
++        inv_expsum = softmax_op.input_tensors[1]
++        expsum = inv_expsum.op.input_tensors[0]
+         max_elem = s[exp].op.input_tensors[1]
+         delta = None
+         axis = int(softmax_op.attrs["axis"])
+     elif op_tag == "fast_softmax_output":
+         exp = softmax_op.input_tensors[0]
+-        expsum = softmax_op.input_tensors[1]
++        inv_expsum = softmax_op.input_tensors[1]
++        expsum = inv_expsum.op.input_tensors[0]
+         delta = s[exp].op.input_tensors[0]
+         max_elem = s[delta].op.input_tensors[1]
+         axis = int(softmax_op.attrs["axis"])
+@@ -53,7 +55,31 @@ def _schedule_softmax(softmax_op, s, outs):
+     fused_outer_axes = s[softmax_op].fuse(*outer_axes)
+     s[softmax_op].parallel(fused_outer_axes)
+ 
++    if outs[0].ndim == 3 or outs[0].ndim == 4:
++        *T_softmax_maxelem_other_axes, T_softmax_maxelem_k = tuple(max_elem.op.axis) + tuple(max_elem.op.reduce_axis)
++        *T_softmax_expsum_other_axes, T_softmax_expsum_k = tuple(expsum.op.axis) + tuple(expsum.op.reduce_axis)
++        
++        # max_elem rfactor调整归约操作
++        T_softmax_maxelem_k_o, T_softmax_maxelem_k_i = s[max_elem].split(T_softmax_maxelem_k, factor=15)
++        T_softmax_maxelem_rf = s.rfactor(max_elem, T_softmax_maxelem_k_i, factor_axis=2)
++        *T_softmax_maxelem_rf_outer_axes, T_softmax_maxelem_rf_k_i, T_softmax_maxelem_rf_k_o = tuple(T_softmax_maxelem_rf.op.axis) + tuple(T_softmax_maxelem_rf.op.reduce_axis)
++        s[T_softmax_maxelem_rf].reorder(*T_softmax_maxelem_rf_outer_axes, T_softmax_maxelem_rf_k_o, T_softmax_maxelem_rf_k_i)
++        s[T_softmax_maxelem_rf].vectorize(T_softmax_maxelem_rf_k_i)
++        
++        # expsum rfactor调整归约操作
++        T_softmax_expsum_k_o, T_softmax_expsum_k_i = s[expsum].split(T_softmax_expsum_k, factor=15)
++        T_softmax_expsum_rf = s.rfactor(expsum, T_softmax_expsum_k_i, factor_axis=2)
++        *T_softmax_expsum_rf_outer_axes, T_softmax_expsum_rf_k_i, T_softmax_expsum_rf_k_o = tuple(T_softmax_expsum_rf.op.axis) + tuple(T_softmax_expsum_rf.op.reduce_axis)
++        s[T_softmax_expsum_rf].reorder(*T_softmax_expsum_rf_outer_axes, T_softmax_expsum_rf_k_o, T_softmax_expsum_rf_k_i)
++        s[T_softmax_expsum_rf].vectorize(T_softmax_expsum_rf_k_i)
++ 
++        # move computations with the same outer dimensions under the same root
++        s[T_softmax_maxelem_rf].compute_at(s[softmax_op], fused_outer_axes)
++        s[T_softmax_expsum_rf].compute_at(s[softmax_op], fused_outer_axes)
++
+     # move computations with the same outer dimensions under the same root
++    if op_tag == "softmax_output" or op_tag == "fast_softmax_output":
++        s[inv_expsum].compute_at(s[softmax_op], fused_outer_axes)
+     s[max_elem].compute_at(s[softmax_op], fused_outer_axes)
+     s[expsum].compute_at(s[softmax_op], fused_outer_axes)
+ 
