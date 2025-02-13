@@ -29,7 +29,7 @@ index cb6d5b3..452b226 100644
 +    inv_expsum = te.compute(
 +        reduced_shape, lambda *indices: _compute_inv_expsum(expsum, *indices), name="T_softmax_inv_expsum"
 +    )
-+ 
++
      return te.compute(
          shape,
 -        lambda *indices: _normalize(exp, expsum, *indices),
@@ -75,21 +75,21 @@ index 9b6754c..e70fc6d 100644
 +    if outs[0].ndim == 3 or outs[0].ndim == 4:
 +        *T_softmax_maxelem_other_axes, T_softmax_maxelem_k = tuple(max_elem.op.axis) + tuple(max_elem.op.reduce_axis)
 +        *T_softmax_expsum_other_axes, T_softmax_expsum_k = tuple(expsum.op.axis) + tuple(expsum.op.reduce_axis)
-+        
++
 +        # max_elem rfactor调整归约操作
 +        T_softmax_maxelem_k_o, T_softmax_maxelem_k_i = s[max_elem].split(T_softmax_maxelem_k, factor=15)
 +        T_softmax_maxelem_rf = s.rfactor(max_elem, T_softmax_maxelem_k_i, factor_axis=2)
 +        *T_softmax_maxelem_rf_outer_axes, T_softmax_maxelem_rf_k_i, T_softmax_maxelem_rf_k_o = tuple(T_softmax_maxelem_rf.op.axis) + tuple(T_softmax_maxelem_rf.op.reduce_axis)
 +        s[T_softmax_maxelem_rf].reorder(*T_softmax_maxelem_rf_outer_axes, T_softmax_maxelem_rf_k_o, T_softmax_maxelem_rf_k_i)
 +        s[T_softmax_maxelem_rf].vectorize(T_softmax_maxelem_rf_k_i)
-+        
++
 +        # expsum rfactor调整归约操作
 +        T_softmax_expsum_k_o, T_softmax_expsum_k_i = s[expsum].split(T_softmax_expsum_k, factor=15)
 +        T_softmax_expsum_rf = s.rfactor(expsum, T_softmax_expsum_k_i, factor_axis=2)
 +        *T_softmax_expsum_rf_outer_axes, T_softmax_expsum_rf_k_i, T_softmax_expsum_rf_k_o = tuple(T_softmax_expsum_rf.op.axis) + tuple(T_softmax_expsum_rf.op.reduce_axis)
 +        s[T_softmax_expsum_rf].reorder(*T_softmax_expsum_rf_outer_axes, T_softmax_expsum_rf_k_o, T_softmax_expsum_rf_k_i)
 +        s[T_softmax_expsum_rf].vectorize(T_softmax_expsum_rf_k_i)
-+ 
++
 +        # move computations with the same outer dimensions under the same root
 +        s[T_softmax_maxelem_rf].compute_at(s[softmax_op], fused_outer_axes)
 +        s[T_softmax_expsum_rf].compute_at(s[softmax_op], fused_outer_axes)
